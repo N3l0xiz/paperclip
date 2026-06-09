@@ -41,19 +41,47 @@ matches how the belt feeds finished work away.
 2. **Attach the post-processor** under *Print Settings → Output options →
    Post-processing Scripts*:
    ```
-   python3 /absolute/path/to/nelox-belt/nelox_belt.py --angle 45;
+   python3 /absolute/path/to/beltprinter/nelox_belt.py --machine /absolute/path/to/beltprinter/machines/ideaformer_ir3v2.json;
    ```
-   Orca appends the sliced file path automatically.
+   Orca appends the sliced file path automatically. `--machine` pulls the gantry
+   angle, Z/feedrate scaling and start/end markers straight from the config.
 3. **Orient** the model upright with its belt-length dimension pointing **+Y**, then
    slice and export. The output is belt-ready G-code.
+
+## Machine config (single source of truth)
+
+All printer mechanics live in an adjustable JSON file — see
+[`machines/ideaformer_ir3v2.json`](machines/ideaformer_ir3v2.json). Values are
+verified against a working community Klipper config. Every field is editable, and
+gear ratios are first-class:
+
+| Axis | rotation_distance | gear_ratio | notes |
+|---|---|---|---|
+| X / Y (CoreXY) | 40 | 1:1 | 20T GT2, ungeared |
+| Y belt feed | 40 | 1:1 | conveyor, soft max 354 mm |
+| Z (45° gantry) | 3.7 | 1:1* | gearbox-driven (reduction baked into rotation_distance) |
+| Extruder | 4.4 | 1:1* | dual-gear direct drive (~3:1 baked in) |
+
+\* The stock firmware folds the gearbox/dual-gear reduction into the effective
+`rotation_distance`. To model a gear box explicitly, set `gear_ratio` to e.g.
+`[50, 17]` and the ungeared `rotation_distance`; the effective value
+(`rotation_distance ÷ (num/den)`) is what reaches the axis.
+
+```bash
+python3 machine.py machines/ideaformer_ir3v2.json              # human-readable summary
+python3 machine.py machines/ideaformer_ir3v2.json --print-cfg  # regenerate Klipper stepper lines
+```
+
+So you edit gear ratios in one place and regenerate the `printer.cfg` stepper
+sections — no drift between the slicer config and the firmware.
 
 ## Command-line usage
 
 ```bash
-# In place (how Orca calls it):
-python3 nelox_belt.py path/to/sliced.gcode
+# Use the machine config (recommended — how Orca calls it):
+python3 nelox_belt.py --machine machines/ideaformer_ir3v2.json path/to/sliced.gcode
 
-# Explicit output, custom angle:
+# Or specify everything by hand:
 python3 nelox_belt.py --angle 45 -o out.gcode in.gcode
 
 # Analyze only, write nothing:
@@ -62,6 +90,7 @@ python3 nelox_belt.py --dry-run in.gcode
 
 | Flag | Purpose |
 |---|---|
+| `-m, --machine` | load a machine JSON for angle + post-process defaults (CLI flags override) |
 | `-a, --angle` | gantry angle in degrees (default 45) |
 | `-o, --output` | write here instead of editing in place |
 | `--no-scale-z` | skip Z scaling (only if firmware compensates the tilt — verify first) |
@@ -102,11 +131,14 @@ machine profile, (3) belt-wall / first-layer compensation tuning.
 ## Development
 
 ```bash
-python3 nelox-belt/tests/test_nelox_belt.py        # run the unit tests
+# from the repo root:
+python3 beltprinter/tests/test_nelox_belt.py   # G-code transform tests
+python3 beltprinter/tests/test_machine.py      # machine-config tests
 ```
 
-The transform math lives in the `Transform` class and the G-code stream handling in
-`transform_gcode()` — both are pure/iterable-based and unit-tested.
+The transform math lives in the `Transform` class, the G-code stream handling in
+`transform_gcode()` (both in `nelox_belt.py`), and the machine model in `machine.py` —
+all pure/iterable-based and unit-tested.
 
 ---
 

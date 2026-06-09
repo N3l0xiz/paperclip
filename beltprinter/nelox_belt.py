@@ -282,7 +282,13 @@ def main(argv=None) -> int:
     )
     p.add_argument("input", help="input G-code file (edited in place when no -o is given)")
     p.add_argument("-o", "--output", help="write to this file instead of editing in place")
-    p.add_argument("-a", "--angle", type=float, default=45.0, help="gantry angle in degrees (default: 45)")
+    p.add_argument(
+        "-m",
+        "--machine",
+        help="machine JSON (e.g. machines/ideaformer_ir3v2.json) supplying gantry angle "
+        "and post-process defaults; explicit flags below override it",
+    )
+    p.add_argument("-a", "--angle", type=float, default=None, help="gantry angle in degrees (default: 45)")
     p.add_argument(
         "--no-scale-z",
         action="store_true",
@@ -300,8 +306,32 @@ def main(argv=None) -> int:
     p.add_argument("--version", action="version", version=f"{BRAND} {VERSION}")
     args = p.parse_args(argv)
 
+    # Layer machine-config defaults under the explicit CLI flags.
+    m_angle, m_scale_z, m_scale_f, m_begin, m_end = None, True, True, None, None
+    if args.machine:
+        try:
+            from machine import load_machine  # local module, no third-party deps
+        except ImportError:
+            import os
+            sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+            from machine import load_machine
+        try:
+            mc = load_machine(args.machine)
+        except Exception as exc:  # noqa: BLE001 — surface any config error cleanly
+            print(f"{BRAND}: cannot load machine {args.machine}: {exc}", file=sys.stderr)
+            return 2
+        m_angle, m_scale_z, m_scale_f = mc.gantry_angle_deg, mc.scale_z, mc.scale_feedrate
+        m_begin, m_end = mc.begin_marker, mc.end_marker
+
+    angle = args.angle if args.angle is not None else (m_angle if m_angle is not None else 45.0)
+    # store_true flags can only force OFF; the machine config sets the base value.
+    scale_z = (m_scale_z if args.machine else True) and not args.no_scale_z
+    scale_feedrate = (m_scale_f if args.machine else True) and not args.no_scale_feedrate
+    begin_marker = args.begin_marker if args.begin_marker is not None else m_begin
+    end_marker = args.end_marker if args.end_marker is not None else m_end
+
     try:
-        transform = Transform(angle_deg=args.angle, scale_z=not args.no_scale_z)
+        transform = Transform(angle_deg=angle, scale_z=scale_z)
     except ValueError as exc:
         print(f"{BRAND}: {exc}", file=sys.stderr)
         return 2
@@ -313,13 +343,12 @@ def main(argv=None) -> int:
         print(f"{BRAND}: cannot read {args.input}: {exc}", file=sys.stderr)
         return 1
 
-    scale_feedrate = not args.no_scale_feedrate
     result = list(
         transform_gcode(
             source,
             transform,
-            begin_marker=args.begin_marker,
-            end_marker=args.end_marker,
+            begin_marker=begin_marker,
+            end_marker=end_marker,
             scale_feedrate=scale_feedrate,
             decimals=args.decimals,
         )

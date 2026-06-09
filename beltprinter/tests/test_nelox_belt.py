@@ -1,7 +1,7 @@
 """Unit tests for the Nelox Belt transform and G-code processing.
 
-Run with:  python3 -m unittest discover -s nelox-belt/tests
-or simply: python3 nelox-belt/tests/test_nelox_belt.py
+Run with:  python3 -m unittest discover -s beltprinter/tests
+or simply: python3 beltprinter/tests/test_nelox_belt.py
 """
 import math
 import os

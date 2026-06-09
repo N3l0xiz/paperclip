@@ -1,0 +1,77 @@
+{
+  "name": "IdeaFormer IR3 V2",
+  "firmware": "klipper",
+  "kinematics": "corexy",
+  "comment": "Belt/conveyor printer, 45-degree tilted gantry. Values verified against a working community printer.cfg (github.com/dborio/Ideaformer-IR3v2). Everything here is adjustable; gear_ratio is expressed as [numerator, denominator] like Klipper's gear_ratio (e.g. [50, 17]). The effective distance moved per MOTOR revolution is rotation_distance / (numerator/denominator).",
+
+  "gantry_angle_deg": 45.0,
+
+  "build_volume": {
+    "x": 250,
+    "y": 354,
+    "z": null,
+    "infinite_axis": "y",
+    "comment": "y is the belt-feed direction and is effectively infinite; 354 is the stock soft limit. z is null = unbounded (we slice upright; height becomes belt length)."
+  },
+
+  "nozzle_diameter": 0.4,
+  "filament_diameter": 1.75,
+
+  "motion": {
+    "max_velocity": 400,
+    "max_accel": 20000
+  },
+
+  "axes": {
+    "x": {
+      "rotation_distance": 40,
+      "gear_ratio": [1, 1],
+      "microsteps": 32,
+      "full_steps_per_rotation": 200,
+      "pulley_teeth": 20,
+      "belt_pitch": 2.0,
+      "geared": false,
+      "note": "CoreXY A/B motor. 20T GT2 pulley, ungeared."
+    },
+    "y": {
+      "rotation_distance": 40,
+      "gear_ratio": [1, 1],
+      "microsteps": 32,
+      "full_steps_per_rotation": 200,
+      "pulley_teeth": 20,
+      "belt_pitch": 2.0,
+      "geared": false,
+      "is_belt_feed": true,
+      "position_min": -5,
+      "position_max": 354,
+      "note": "Conveyor-belt feed axis. Ungeared 20T GT2."
+    },
+    "z": {
+      "rotation_distance": 3.7,
+      "gear_ratio": [1, 1],
+      "microsteps": 32,
+      "full_steps_per_rotation": 200,
+      "geared": true,
+      "position_min": -5,
+      "position_max": 99999,
+      "note": "45-degree gantry rail, gearbox-driven. The stock config folds the gearbox reduction into the effective rotation_distance of 3.7, so gear_ratio is left at 1:1. To model the gearbox explicitly, set gear_ratio to the box's reduction and set rotation_distance to the ungeared value (effective = rotation_distance / ratio must stay 3.7)."
+    },
+    "extruder": {
+      "rotation_distance": 4.4,
+      "gear_ratio": [1, 1],
+      "microsteps": 32,
+      "full_steps_per_rotation": 200,
+      "type": "dual-gear direct drive (BMG-style)",
+      "geared": true,
+      "note": "Dual-gear direct extruder. The ~3:1 dual-gear reduction is already baked into the effective rotation_distance of 4.4, so gear_ratio stays 1:1. If you swap to expressing it explicitly, a common BMG ratio is [50, 17] (~2.94:1); then set rotation_distance so rotation_distance/(50/17) stays your calibrated value."
+    }
+  },
+
+  "postprocess": {
+    "scale_z": true,
+    "scale_feedrate": true,
+    "begin_marker": "; nelox:begin",
+    "end_marker": "; nelox:end",
+    "comment": "Defaults for nelox_belt.py when run with --machine. scale_z=true because mainline Klipper has no belt kinematics; verify with a calibration cube before long prints."
+  }
+}

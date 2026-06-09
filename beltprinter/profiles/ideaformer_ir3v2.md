@@ -38,15 +38,17 @@ roadmap — see the main README.
 Set **Post-processing Scripts** to (one line, adjust the absolute path):
 
 ```
-python3 /absolute/path/to/nelox-belt/nelox_belt.py --angle 45;
+python3 /absolute/path/to/beltprinter/nelox_belt.py --machine /absolute/path/to/beltprinter/machines/ideaformer_ir3v2.json;
 ```
 
-OrcaSlicer appends the G-code file path as the final argument automatically.
+OrcaSlicer appends the G-code file path as the final argument automatically. Using
+`--machine` pulls the 45° gantry angle, scaling and markers from the config, so
+there's a single place to adjust the printer's parameters.
 
 On Windows, point at your interpreter explicitly, e.g.:
 
 ```
-"C:\Python311\python.exe" "C:\tools\nelox-belt\nelox_belt.py" --angle 45;
+"C:\Python311\python.exe" "C:\tools\beltprinter\nelox_belt.py" --machine "C:\tools\beltprinter\machines\ideaformer_ir3v2.json";
 ```
 
 ### Optional flags
