@@ -98,12 +98,30 @@ class TestGcodeProcessingBeltZ(unittest.TestCase):
         out = run(["G1 E-2 F2400\n"], transform=Transform(45.0))
         self.assertEqual(out[0], "G1 E-2 F2400\n")
 
-    def test_g92_resets_real_frame(self):
+    def test_g92_rewritten_to_machine_frame(self):
+        # G92 X/Y/Z must be rewritten into machine coords so the firmware frame stays
+        # in sync. At y=0,z=0 the machine equivalent is Y0 Z0.
         lines = ["G92 Z0\n", "G1 Z2 Y0\n"]
         out = run(lines, transform=Transform(45.0))
-        self.assertEqual(out[0], "G92 Z0\n")
+        self.assertEqual(out[0], "G92 Y0 Z0\n")
         self.assertIn("Z2", out[1])        # shift(0,2)=2
         self.assertIn("Y2.8284", out[1])   # lift(2)
+
+    def test_g92_nonzero_context_no_desync(self):
+        # Regression for the belt-motion desync bug: a G92 Z0 while the belt (Z) is
+        # physically advanced must re-label Z to the current shift, not to 0.
+        lines = ["G1 X0 Y10 Z0\n", "G92 Z0\n", "G1 X0 Y10 Z5\n"]
+        out = run(lines, transform=Transform(45.0))
+        # After "G1 ... Y10 Z0": belt Z = shift(10,0) = 10.
+        self.assertIn("Z10", out[0])
+        # G92 Z0 relabels to machine Z = shift(10,0) = 10 (NOT 0).
+        self.assertIn("Z10", out[1])
+        # Final move belt Z = shift(10,5) = 15; true belt progression 15-10 = 5mm.
+        self.assertIn("Z15", out[2])
+
+    def test_g92_e0_passes_through(self):
+        out = run(["G92 E0\n"], transform=Transform(45.0))
+        self.assertEqual(out[0], "G92 E0\n")
 
     def test_feedrate_scaling_pure_z(self):
         # Model Z move dz=1: machine delta has lift=sqrt2 and shift=1, len=sqrt(3).
@@ -119,6 +137,65 @@ class TestGcodeProcessingBeltY(unittest.TestCase):
         out = run(["G1 X10 Y5 Z2\n"], transform=Transform(45.0, belt_axis="y"), scale_feedrate=False)
         self.assertIn("Y7", out[0])        # shift on Y
         self.assertIn("Z2.8284", out[0])   # lift on Z
+
+
+class TestParsingRobustness(unittest.TestCase):
+    def test_scientific_notation_no_phantom_extrusion(self):
+        # X1e3 must parse as one word (X=1000), not X1 + a phantom E3.
+        out = run(["G1 X1e3 Z2\n"], transform=Transform(45.0))
+        self.assertIn("X1000", out[0])
+        self.assertNotIn("E3", out[0])
+
+    def test_leading_plus_sign(self):
+        out = run(["G1 X+5 Z2\n"], transform=Transform(45.0))
+        self.assertIn("X5", out[0])
+
+    def test_no_space_command_is_transformed(self):
+        # "G1X10Z2" must be recognized as a move, not passed through verbatim.
+        out = run(["G1X10Z2\n"], transform=Transform(45.0))
+        self.assertIn("X10", out[0])
+        self.assertIn("Z2", out[0])     # shift(0,2)=2
+        self.assertNotEqual(out[0], "G1X10Z2\n")
+
+    def test_lowercase_command(self):
+        out = run(["g1 x10 z2\n"], transform=Transform(45.0))
+        self.assertIn("X10", out[0])
+
+    def test_negative_z_warns(self):
+        run(["G1 Z-1\n"], transform=Transform(45.0))
+        stats = transform_gcode.last_stats
+        self.assertTrue(any("below-belt" in w for w in stats.warnings))
+
+
+class TestModalFeedrate(unittest.TestCase):
+    def test_modal_f_reemitted_on_fless_z_move(self):
+        # F set once, then an F-less Z move (layer change) must get a scaled F so the
+        # rail/belt axis isn't run at the wrong speed.
+        lines = ["G1 X0 Y0 Z0 F1000\n", "G1 Z1\n"]
+        out = run(lines, transform=Transform(45.0), scale_feedrate=True)
+        # Second move scales F by the machine/real ratio (sqrt3 for a pure-z move).
+        self.assertIn("F", out[1])
+        f_val = float(out[1].split("F")[1].split()[0])
+        self.assertAlmostEqual(f_val, 1000 * math.sqrt(3), places=0)
+
+    def test_feedrate_restored_after_scaled_move(self):
+        # in-layer move (scale 1) after a scaled z move should restore F to 1000.
+        lines = ["G1 X0 Y0 Z0 F1000\n", "G1 Z1\n", "G1 X10\n"]
+        out = run(lines, transform=Transform(45.0), scale_feedrate=True)
+        f_val = float(out[2].split("F")[1].split()[0])
+        self.assertAlmostEqual(f_val, 1000.0, places=0)
+
+    def test_max_velocity_clamp(self):
+        # F1000 is fine, but the z-move scales it to ~1732 > 20 mm/s (1200 mm/min).
+        lines = ["G1 X0 Y0 Z0 F1000\n", "G1 Z1\n"]
+        out = run(lines, transform=Transform(45.0), scale_feedrate=True, max_velocity=20)
+        f_val = float(out[1].split("F")[1].split()[0])
+        self.assertAlmostEqual(f_val, 20 * 60, places=0)  # clamped to 1200 mm/min
+        self.assertTrue(any("clamped" in w for w in transform_gcode.last_stats.warnings))
+
+    def test_no_scaling_passes_f_through(self):
+        out = run(["G1 X10 Z2 F1800\n"], transform=Transform(45.0), scale_feedrate=False)
+        self.assertIn("F1800", out[0])
 
 
 class TestMarkersAndModes(unittest.TestCase):

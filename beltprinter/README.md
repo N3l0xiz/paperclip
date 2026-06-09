@@ -107,6 +107,7 @@ python3 nelox_belt.py --dry-run in.gcode
 | `-o, --output` | write here instead of editing in place |
 | `--no-scale-z` | skip rail (lift) scaling (only if firmware compensates the tilt — verify first) |
 | `--no-scale-feedrate` | leave F values untouched |
+| `--max-velocity` | clamp belt/rail feedrate to this many mm/s (default: from `--machine`) |
 | `--begin-marker` / `--end-marker` | only transform between marker comments, so start/end G-code stays in machine coordinates |
 | `--decimals` | coordinate precision (default 4) |
 | `--dry-run` | report stats and warnings, write nothing |
@@ -116,29 +117,36 @@ can run through the script, and `examples/sample_belt.gcode` for the result.
 
 ## What it handles
 
-- G0/G1 linear moves (absolute G90 and relative G91), with G92 position resets and
-  M82/M83 / G90/G91 mode tracking.
-- Emits the required Y-shift even on Z-only moves (where the original line had no Y).
-- Leaves extrusion `E` untouched (the deposited volume is unchanged) and optionally
-  scales feedrate `F` so real print speed is preserved.
+- G0/G1 linear moves (absolute G90 and relative G91), and tolerant parsing: no-space
+  commands (`G1X10`), lowercase (`g1`), signed/`+`/scientific-notation coordinates.
+- **G92 position resets** are rewritten into machine coordinates so the firmware's
+  frame can't desync from the model frame (a silent belt-motion error otherwise).
+- Emits the dependent machine axes even on Z-only moves (both Y and Z can depend on
+  model z).
+- Leaves extrusion `E` untouched (the deposited volume is unchanged) and handles the
+  **modal feedrate** correctly: F is re-emitted (and scaled) on F-less moves so the
+  rail/belt axis is never run at the wrong speed, clamped to `max_velocity`.
 - Passes start/end G-code through untransformed via begin/end markers.
-- Detects G2/G3 **arc moves** and warns — a shear can't be re-expressed as an arc, so
-  disable arc fitting in the slicer.
+- Warns on **below-belt moves** (model z < 0) and on G2/G3 **arc moves** (a shear can't
+  be re-expressed as an arc — disable arc fitting in the slicer).
 
 ## Limitations & roadmap
 
-This is a **v1 geometric transform**. It is exact for models that fit within the
-gantry height. Known limitations:
+This is a **geometric transform**. It is exact for models that fit within the gantry
+height. Known limitations:
 
-- **No infinite-length re-ordering yet.** True endless printing needs the slice to be
-  re-ordered into diagonal front-to-back columns (the BlackBelt approach) rather than
-  full horizontal layers. That's the headline next step.
-- **Firmware Z convention** (`scale_z`) should be confirmed with a calibration cube —
-  see the "Verify" section in the profile guide.
-- Feedrate scaling is per-move linear; arc moves are not supported (disable arc fitting).
+- **No infinite-length re-ordering.** True endless printing needs the slice to be
+  re-ordered into diagonal front-to-back (keel-first) columns inside the slicer engine
+  — that is fundamentally a slicer-engine job, not something a post-processor on
+  already-ordered horizontal-layer G-code can do. For genuinely infinite prints, a
+  native belt fork (e.g. ShidaoSlicer) is the right tool; Nelox Belt targets finite,
+  within-gantry-height prints on your existing single OrcaSlicer install.
+- **Firmware conventions** (`belt_axis`, `scale_z`) should be confirmed with a
+  calibration cube — see the profile guide.
+- Arc moves are not supported (disable arc fitting).
 
-Roadmap: (1) diagonal-column re-ordering for true infinite Z, (2) an importable Orca
-machine profile, (3) belt-wall / first-layer compensation tuning.
+Roadmap: (1) a configurable gantry-height check (warn/abort when a print exceeds it),
+(2) an importable Orca machine profile, (3) belt-wall / first-layer compensation.
 
 ## Development
 

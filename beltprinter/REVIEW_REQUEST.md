@@ -44,7 +44,6 @@ Z axis, so belt_axis="z" is correct for it.
 Be concrete: cite line numbers and give minimal failing examples where possible.
 
 ---
-
 ## SOURCE: nelox_belt.py
 
 ```python
@@ -94,10 +93,16 @@ import sys
 from dataclasses import dataclass, field
 
 BRAND = "Nelox Belt"
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 
-# Matches a G-code word like X12.34, Y-5, Z0.2, E1.5, F1800 (letter + signed number).
-_WORD = re.compile(r"([A-Za-z])\s*(-?\d*\.?\d+)")
+# Matches a G-code word like X12.34, Y-5, Z+0.2, E1.5e-3, F1800 — a letter followed
+# by a signed number with an optional exponent. The exponent is consumed as part of
+# the number so it is never mis-parsed as a separate word (e.g. X1e3 -> one word).
+_WORD = re.compile(r"([A-Za-z])\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)")
+
+# Leading command token of a line, e.g. "G1", "G92", "M82" — tolerant of no space
+# before the parameters ("G1X10") and of lowercase ("g1").
+_CMD = re.compile(r"\s*([A-Za-z]\d+)")
 
 
 @dataclass
@@ -160,6 +165,8 @@ class State:
     z: float = 0.0
     absolute_xyz: bool = True  # G90 (default) vs G91
     transforming: bool = False  # gated by the begin/end markers
+    feed_real: float | None = None      # last modal feedrate the slicer intended (mm/min)
+    feed_emitted: float | None = None   # feedrate the firmware currently holds (machine frame)
 
 
 @dataclass
@@ -192,6 +199,7 @@ def transform_gcode(
     end_marker: str | None = None,
     scale_feedrate: bool = True,
     decimals: int = 4,
+    max_velocity: float | None = None,
 ):
     """Yield transformed G-code lines. `lines` is any iterable of strings.
 
@@ -223,32 +231,67 @@ def transform_gcode(
             yield raw
             continue
 
-        upper = stripped.upper()
+        # Identify the leading command (tolerant of "G1X10" and lowercase "g1").
+        cmd_match = _CMD.match(stripped)
+        if not cmd_match:
+            yield raw
+            continue
+        gword = cmd_match.group(1)
+        cmd = gword.upper()
+        rest = stripped[cmd_match.end():]
 
         # Track positioning mode regardless of whether we're transforming yet.
-        if upper.startswith("G90"):
+        if cmd == "G90":
             state.absolute_xyz = True
             yield raw
             continue
-        if upper.startswith("G91"):
+        if cmd == "G91":
             state.absolute_xyz = False
             yield raw
             continue
-        if upper.startswith("G92"):
-            # Position reset: keep the slicer's intent in the real frame.
-            for letter, value in _WORD.findall(stripped):
-                L = letter.upper()
-                if L == "X":
-                    state.x = float(value)
-                elif L == "Y":
-                    state.y = float(value)
-                elif L == "Z":
-                    state.z = float(value)
-            yield raw
+
+        # Which machine axes to (re-)emit for a given set of present model axes.
+        def _axis_emits(has_x: bool, has_y: bool, has_z: bool):
+            shift_changed = has_y or has_z  # belt progression depends on model y and z
+            lift_changed = has_z            # rail lift depends on model z
+            if transform.belt_axis == "z":
+                return has_x, lift_changed, shift_changed
+            return has_x, shift_changed, lift_changed
+
+        if cmd == "G92":
+            words = _WORD.findall(rest)
+            present = {letter.upper(): value for letter, value in words}
+            has_xyz = any(L in present for L in ("X", "Y", "Z"))
+            if not (has_xyz and state.transforming):
+                # G92 E0 and resets in untransformed (machine-frame) regions: leave be.
+                yield raw
+                continue
+            # Redefine the real-frame origin, then re-emit the equivalent machine
+            # coordinates so the firmware's frame stays in sync with ours.
+            if "X" in present:
+                state.x = float(present["X"])
+            if "Y" in present:
+                state.y = float(present["Y"])
+            if "Z" in present:
+                state.z = float(present["Z"])
+            mx, my, mz = transform.machine(state.x, state.y, state.z)
+            emit_x, emit_y, emit_z = _axis_emits("X" in present, "Y" in present, "Z" in present)
+            parts = ["G92"]
+            if emit_x:
+                parts.append("X" + _fmt(mx, decimals))
+            if emit_y:
+                parts.append("Y" + _fmt(my, decimals))
+            if emit_z:
+                parts.append("Z" + _fmt(mz, decimals))
+            for letter, value in words:  # keep E and any other reset words verbatim
+                if letter.upper() not in ("X", "Y", "Z"):
+                    parts.append(letter + value)
+            rebuilt = " ".join(parts) + (" " + comment if comment else "")
+            yield rebuilt + "\n"
             continue
 
-        is_linear = upper.startswith(("G0 ", "G1 ", "G0\t", "G1\t")) or upper in ("G0", "G1")
-        is_arc = upper.startswith(("G2 ", "G3 ", "G2\t", "G3\t")) or upper in ("G2", "G3")
+        is_linear = cmd in ("G0", "G1")
+        is_arc = cmd in ("G2", "G3")
 
         if is_arc and state.transforming:
             # A shear turns a circle into an ellipse — it can't be re-expressed as
@@ -267,12 +310,18 @@ def transform_gcode(
             continue
 
         # --- Transform a linear move -------------------------------------------------
-        # Split off the leading command word (G0/G1) so it is not parsed as a coord.
-        gword, _, rest = stripped.partition(" ")
         words = _WORD.findall(rest)
         present = {letter.upper(): value for letter, value in words}  # raw value strings
+
+        # Track the modal feedrate the slicer intends, in the real frame.
+        if "F" in present:
+            state.feed_real = float(present["F"])
+
         if not any(L in present for L in ("X", "Y", "Z")):
-            # Pure E/F move (e.g. retraction) — nothing geometric to do.
+            # Pure E/F move (e.g. retraction or a bare "G1 F1800"): no geometry. The
+            # firmware adopts any F here verbatim, so mirror that into feed_emitted.
+            if "F" in present:
+                state.feed_emitted = state.feed_real
             yield raw
             continue
 
@@ -295,25 +344,21 @@ def transform_gcode(
             state.z += dz
         new = (state.x, state.y, state.z)
 
-        # Feedrate scaling: machine path length / real path length for this move.
+        # Safety: a model point below the belt would drive the toolhead into it.
+        if state.z < -1e-6 and "below-belt" not in " ".join(stats.warnings):
+            stats.warnings.append(
+                f"below-belt move: model z = {state.z:g} < 0 — the toolhead would dive "
+                "below the belt surface; check model placement / start G-code"
+            )
+
+        # Feedrate: scale by machine path length / real path length for this move.
         f_scale = 1.0
-        if scale_feedrate and "F" in present:
+        if scale_feedrate:
             real_d = math.dist(prev, new)
             if real_d > 1e-9:
-                mp = transform.machine(*prev)
-                mn = transform.machine(*new)
-                f_scale = math.dist(mp, mn) / real_d
+                f_scale = math.dist(transform.machine(*prev), transform.machine(*new)) / real_d
 
-        # Work out which MACHINE axes must be re-emitted from which MODEL words.
-        # The shift coordinate depends on model y and z; the lift coordinate on z.
-        # With belt_axis="z": Y=lift(z), Z=shift(y,z); with "y": Y=shift(y,z), Z=lift(z).
-        has_y, has_z = "Y" in present, "Z" in present
-        shift_changed = has_y or has_z
-        lift_changed = has_z
-        if transform.belt_axis == "z":
-            emit_my, emit_mz = lift_changed, shift_changed
-        else:
-            emit_my, emit_mz = shift_changed, lift_changed
+        emit_x, emit_my, emit_mz = _axis_emits("X" in present, "Y" in present, "Z" in present)
 
         # Compute machine coordinates (absolute) or deltas (relative) in one call.
         if state.absolute_xyz:
@@ -323,21 +368,35 @@ def transform_gcode(
 
         # Rebuild in canonical order: command, X, Y, Z, E, extras, F.
         parts = [gword]
-        if "X" in present:
+        if emit_x:
             parts.append("X" + _fmt(mx, decimals))
         if emit_my:
             parts.append("Y" + _fmt(my, decimals))
         if emit_mz:
             parts.append("Z" + _fmt(mz, decimals))
-
         if "E" in present:
             parts.append("E" + present["E"])  # extrusion unchanged, original text kept
         for letter, value in words:  # passthrough for any non-geometry words (e.g. S)
             if letter.upper() not in ("X", "Y", "Z", "E", "F"):
                 parts.append(letter + value)
-        if "F" in present:
-            f_val = float(present["F"]) * f_scale
-            parts.append("F" + (_fmt(f_val, 1) if f_scale != 1.0 else present["F"]))
+
+        # Feedrate emission. With scaling on, F is modal: re-emit the scaled machine
+        # feedrate whenever it differs from what the firmware currently holds (so the
+        # rail/belt axis isn't run at the wrong speed on F-less modal moves), and clamp
+        # to the machine's max velocity to avoid over-speeding into the belt.
+        if scale_feedrate and state.feed_real is not None:
+            desired = state.feed_real * f_scale
+            if max_velocity is not None and desired > max_velocity * 60.0:
+                desired = max_velocity * 60.0
+                if "feedrate clamped" not in " ".join(stats.warnings):
+                    stats.warnings.append(
+                        f"feedrate clamped to max_velocity ({max_velocity} mm/s) on belt moves"
+                    )
+            if state.feed_emitted is None or abs(desired - state.feed_emitted) > 0.5:
+                parts.append("F" + _fmt(desired, 1))
+                state.feed_emitted = desired
+        elif "F" in present:  # scaling off: pass the original feedrate through
+            parts.append("F" + present["F"])
 
         rebuilt = " ".join(parts)
         if comment:
@@ -394,13 +453,21 @@ def main(argv=None) -> int:
     )
     p.add_argument("--begin-marker", help="only transform after a line containing this comment")
     p.add_argument("--end-marker", help="stop transforming at a line containing this comment")
+    p.add_argument(
+        "--max-velocity",
+        type=float,
+        default=None,
+        help="clamp belt/rail feedrate to this many mm/s (default: from --machine, else none)",
+    )
     p.add_argument("--decimals", type=int, default=4, help="coordinate precision (default: 4)")
     p.add_argument("--dry-run", action="store_true", help="analyze and report, but write nothing")
     p.add_argument("--version", action="version", version=f"{BRAND} {VERSION}")
     args = p.parse_args(argv)
 
     # Layer machine-config defaults under the explicit CLI flags.
-    m_angle, m_scale_z, m_scale_f, m_begin, m_end, m_belt = None, True, True, None, None, "z"
+    m_angle, m_scale_z, m_scale_f, m_begin, m_end, m_belt, m_maxv = (
+        None, True, True, None, None, "z", None,
+    )
     if args.machine:
         try:
             from machine import load_machine  # local module, no third-party deps
@@ -415,9 +482,11 @@ def main(argv=None) -> int:
             return 2
         m_angle, m_scale_z, m_scale_f = mc.gantry_angle_deg, mc.scale_z, mc.scale_feedrate
         m_begin, m_end, m_belt = mc.begin_marker, mc.end_marker, mc.belt_axis
+        m_maxv = mc.motion.get("max_velocity")
 
     angle = args.angle if args.angle is not None else (m_angle if m_angle is not None else 45.0)
     belt_axis = args.belt_axis if args.belt_axis is not None else m_belt
+    max_velocity = args.max_velocity if args.max_velocity is not None else m_maxv
     # store_true flags can only force OFF; the machine config sets the base value.
     scale_z = (m_scale_z if args.machine else True) and not args.no_scale_z
     scale_feedrate = (m_scale_f if args.machine else True) and not args.no_scale_feedrate
@@ -445,6 +514,7 @@ def main(argv=None) -> int:
             end_marker=end_marker,
             scale_feedrate=scale_feedrate,
             decimals=args.decimals,
+            max_velocity=max_velocity,
         )
     )
     stats = transform_gcode.last_stats  # type: ignore[attr-defined]

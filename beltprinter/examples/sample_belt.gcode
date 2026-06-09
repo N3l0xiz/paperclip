@@ -1,4 +1,4 @@
-; Processed by Nelox Belt v0.1.0
+; Processed by Nelox Belt v0.2.0
 ;   gantry angle = 45.0 deg, belt_axis = z, scale_z = True, scale_feedrate = True
 ;   transform: X'=x  Y'=z/sin(a)  Z'=y+z*cot(a)
 ; Sample upright-sliced G-code (a tiny 2-layer square) for testing Nelox Belt.
