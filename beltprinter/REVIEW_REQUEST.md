@@ -7,43 +7,70 @@ tilted-gantry conveyor printer (IdeaFormer IR3 V2, Klipper firmware, CoreXY).
 **This output drives real hardware.** Bad geometry can crash the toolhead into the
 belt or fling the gantry. Review accordingly — correctness and safety first.
 
+This is **v0.4.0**, already hardened by one prior independent review. Please both
+re-verify the core and focus on what changed (listed below).
+
 ## What it claims to do
 
-Slice the model upright (normal horizontal layers), then per point `(x, y, z)`
+Slice the model UPRIGHT (normal horizontal layers), then per point `(x, y, z)`
 (z = true height, y = along the belt) derive:
 
     shift = y + z / tan(theta)    # belt progression
     lift  = z / sin(theta)        # gantry-rail travel for the height
 
-and map to machine axes depending on `belt_axis`:
+and map to machine axes by `belt_axis`:
 
-    belt_axis="z" (IR3 V2 default):  X'=x   Y'=lift    Z'=shift
-    belt_axis="y" (CR-30):           X'=x   Y'=shift   Z'=lift
+    belt_axis="z" (IR3 V2 default):  X'=x  Y'=lift   Z'=shift
+    belt_axis="y" (CR-30):           X'=x  Y'=shift  Z'=lift
 
-theta = gantry angle (45°). Claim: IR3 V2 drives the conveyor as the (infinite)
-Z axis, so belt_axis="z" is correct for it.
+theta = gantry angle (45°). The IR3 V2 drives the conveyor as the (infinite) Z axis.
 
-## Please specifically check
+## Context: how this compares to the reference fork (ShidaoSlicer)
 
-1. **Math correctness.** Is the shift/lift derivation right for a 45° tilted gantry?
-   Is `Z' = z·√2` (i.e. 1/sin45) the correct rail scaling? Is the belt_axis="z"
-   mapping (lift→Y, shift→Z) self-consistent and physically sensible?
-2. **Relative mode (G91).** The code applies the SAME linear transform to deltas as
-   to absolute coords, arguing it's linear with no constant term. Is that valid here?
-3. **Axis re-emission.** When a move changes only model-Z, the code emits BOTH machine
-   Y and Z (since both depend on z). Are there cases where a needed axis is dropped,
-   or a stale axis emitted?
-4. **Extrusion / feedrate.** E is left unchanged; F is scaled by
-   |machine_delta|/|real_delta| per move. Is leaving E correct? Is the F scaling sound?
-5. **G-code parsing edge cases.** Comments, G92, G90/G91, M82/M83, arc moves (G2/G3),
-   pure retractions, missing words, integer vs float, whitespace.
-6. **Safety gaps.** What dangerous output could slip through? (e.g. first-layer belt
-   velocity, toolhead diving below the belt, un-transformed travel moves.)
-7. **Anything else** you'd flag before trusting this on a real printer.
+ShidaoSlicer is a hardware-validated native OrcaSlicer fork for this exact printer
+family. Its real pipeline does NATIVE oblique slicing (45° cut planes) plus an
+orthonormal Virtual→Firmware axis permutation, and scales layer height by sqrt(2) in
+the slicer. Its documented net model→machine mapping at 45° is
+`Y_machine = sqrt(2)·Z_model`, `Z_machine = Y_model + Z_model` — which this script's
+`belt_axis="z"` mapping reproduces exactly. ShidaoSlicer also keeps a "legacy shear"
+(`CompatibilityMode::create_legacy_shear_transform`) that is the direct analog of THIS
+tool; notably it recomputes extrusion for non-orthonormal transforms
+(`E_post = E_pre · length_post/length_pre`). That is the basis for the new extrusion
+change below. Please sanity-check our math against that reference.
 
-Be concrete: cite line numbers and give minimal failing examples where possible.
+## What changed since the last review — RE-CHECK THESE
 
----
+1. **Belt-axis mapping** is now `belt_axis="z"` by default (belt on machine Z), since
+   the IR3 V2 is "infinite Z". Confirm the lift→Y / shift→Z routing is right, and that
+   `belt_axis="y"` swaps them correctly.
+2. **G92 X/Y/Z** is rewritten into machine coordinates (previously passed verbatim,
+   causing firmware/model frame desync). Check the rewrite is correct, including the
+   non-zero-context case, and that `G92 E0` is left alone.
+3. **Modal feedrate**: F is tracked and re-emitted (scaled) on F-less moves, clamped to
+   `max_velocity`. Check for over-/under-speed, and that returning to in-layer moves
+   restores the original feedrate.
+4. **Extrusion compensation (NEW)**: on length-changing extruding moves (vase mode /
+   continuous-Z), relative-E (M83) deltas are scaled by the machine/model length ratio;
+   absolute-E (M82) is left alone with a warning. **Scrutinize this:** Is scaling the
+   relative-E delta by `f_scale` the correct volumetric compensation? Is leaving E
+   untouched on in-layer moves (f_scale==1) right? Is the absolute-E warning-only
+   stance acceptable, or is there a safe per-move absolute-E rewrite we should do?
+5. **Parsing robustness**: tolerates no-space commands (`G1X10`), lowercase, leading
+   `+`, and scientific notation. Check for any new mis-parse.
+6. **Safety**: below-belt (model z<0) warning; arc (G2/G3) passthrough warning.
+
+## Please also re-check the original concerns
+
+- Math correctness of shift/lift at 45° from first principles.
+- Relative mode (G91) applying the same linear transform to deltas.
+- Axis re-emission: when only model-Z changes, both machine Y and Z update.
+- G-code parsing edge cases and state tracking (G90/91, M82/83, G92).
+- Any dangerous output that could reach hardware.
+
+Be concrete: cite line numbers and give minimal failing examples. End with a verdict
+on whether it is safe to run on an IR3 V2 (with relative E + arc-fitting off).
+
+
 ## SOURCE: nelox_belt.py
 
 ```python
@@ -93,7 +120,7 @@ import sys
 from dataclasses import dataclass, field
 
 BRAND = "Nelox Belt"
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 
 # Matches a G-code word like X12.34, Y-5, Z+0.2, E1.5e-3, F1800 — a letter followed
 # by a signed number with an optional exponent. The exponent is consumed as part of
@@ -164,6 +191,7 @@ class State:
     y: float = 0.0
     z: float = 0.0
     absolute_xyz: bool = True  # G90 (default) vs G91
+    absolute_e: bool = True     # M82 (default) vs M83 (relative extrusion)
     transforming: bool = False  # gated by the begin/end markers
     feed_real: float | None = None      # last modal feedrate the slicer intended (mm/min)
     feed_emitted: float | None = None   # feedrate the firmware currently holds (machine frame)
@@ -198,6 +226,7 @@ def transform_gcode(
     begin_marker: str | None = None,
     end_marker: str | None = None,
     scale_feedrate: bool = True,
+    scale_extrusion: bool = True,
     decimals: int = 4,
     max_velocity: float | None = None,
 ):
@@ -247,6 +276,14 @@ def transform_gcode(
             continue
         if cmd == "G91":
             state.absolute_xyz = False
+            yield raw
+            continue
+        if cmd == "M82":
+            state.absolute_e = True
+            yield raw
+            continue
+        if cmd == "M83":
+            state.absolute_e = False
             yield raw
             continue
 
@@ -351,9 +388,10 @@ def transform_gcode(
                 "below the belt surface; check model placement / start G-code"
             )
 
-        # Feedrate: scale by machine path length / real path length for this move.
+        # Machine/real path-length ratio for this move. Drives both feedrate scaling
+        # and extrusion compensation, so compute it whenever either is enabled.
         f_scale = 1.0
-        if scale_feedrate:
+        if scale_feedrate or scale_extrusion:
             real_d = math.dist(prev, new)
             if real_d > 1e-9:
                 f_scale = math.dist(transform.machine(*prev), transform.machine(*new)) / real_d
@@ -374,8 +412,27 @@ def transform_gcode(
             parts.append("Y" + _fmt(my, decimals))
         if emit_mz:
             parts.append("Z" + _fmt(mz, decimals))
+
+        # Extrusion compensation. The shear is non-orthonormal, so on moves whose
+        # machine path length differs from the model length (z changes while extruding
+        # — vase mode / continuous-Z) the deposited volume needs E * f_scale to stay
+        # constant. This is a no-op for normal in-layer moves (f_scale == 1). Absolute
+        # E (M82) can't be rescaled per-move without rewriting the whole accumulator,
+        # so we warn and recommend relative E there.
         if "E" in present:
-            parts.append("E" + present["E"])  # extrusion unchanged, original text kept
+            if scale_extrusion and abs(f_scale - 1.0) > 1e-9:
+                if state.absolute_e:
+                    parts.append("E" + present["E"])
+                    if "absolute-E extrusion" not in " ".join(stats.warnings):
+                        stats.warnings.append(
+                            "absolute-E extrusion not compensated on length-changing "
+                            "(vase-mode) moves — enable relative E (M83) for exact volume"
+                        )
+                else:  # relative E: scale the per-move extrusion delta
+                    parts.append("E" + _fmt(float(present["E"]) * f_scale, 5))
+            else:
+                parts.append("E" + present["E"])  # unchanged (normal layer-by-layer)
+
         for letter, value in words:  # passthrough for any non-geometry words (e.g. S)
             if letter.upper() not in ("X", "Y", "Z", "E", "F"):
                 parts.append(letter + value)
@@ -407,7 +464,7 @@ def transform_gcode(
     transform_gcode.last_stats = stats  # type: ignore[attr-defined]
 
 
-def _header(transform: Transform, scale_feedrate: bool) -> str:
+def _header(transform: Transform, scale_feedrate: bool, scale_extrusion: bool = True) -> str:
     shift, lift = "y+z*cot(a)", "z/sin(a)"
     if transform.belt_axis == "z":
         ymap, zmap = lift, shift
@@ -416,7 +473,8 @@ def _header(transform: Transform, scale_feedrate: bool) -> str:
     return (
         f"; Processed by {BRAND} v{VERSION}\n"
         f";   gantry angle = {transform.angle_deg} deg, belt_axis = {transform.belt_axis}, "
-        f"scale_z = {transform.scale_z}, scale_feedrate = {scale_feedrate}\n"
+        f"scale_z = {transform.scale_z}, scale_feedrate = {scale_feedrate}, "
+        f"scale_extrusion = {scale_extrusion}\n"
         f";   transform: X'=x  Y'={ymap}  Z'={zmap}\n"
     )
 
@@ -451,6 +509,11 @@ def main(argv=None) -> int:
         action="store_true",
         help="leave F (feedrate) values untouched",
     )
+    p.add_argument(
+        "--no-scale-extrusion",
+        action="store_true",
+        help="leave E (extrusion) untouched on length-changing (vase-mode) moves",
+    )
     p.add_argument("--begin-marker", help="only transform after a line containing this comment")
     p.add_argument("--end-marker", help="stop transforming at a line containing this comment")
     p.add_argument(
@@ -465,8 +528,8 @@ def main(argv=None) -> int:
     args = p.parse_args(argv)
 
     # Layer machine-config defaults under the explicit CLI flags.
-    m_angle, m_scale_z, m_scale_f, m_begin, m_end, m_belt, m_maxv = (
-        None, True, True, None, None, "z", None,
+    m_angle, m_scale_z, m_scale_f, m_begin, m_end, m_belt, m_maxv, m_scale_e = (
+        None, True, True, None, None, "z", None, True,
     )
     if args.machine:
         try:
@@ -482,7 +545,7 @@ def main(argv=None) -> int:
             return 2
         m_angle, m_scale_z, m_scale_f = mc.gantry_angle_deg, mc.scale_z, mc.scale_feedrate
         m_begin, m_end, m_belt = mc.begin_marker, mc.end_marker, mc.belt_axis
-        m_maxv = mc.motion.get("max_velocity")
+        m_maxv, m_scale_e = mc.motion.get("max_velocity"), mc.scale_extrusion
 
     angle = args.angle if args.angle is not None else (m_angle if m_angle is not None else 45.0)
     belt_axis = args.belt_axis if args.belt_axis is not None else m_belt
@@ -490,6 +553,7 @@ def main(argv=None) -> int:
     # store_true flags can only force OFF; the machine config sets the base value.
     scale_z = (m_scale_z if args.machine else True) and not args.no_scale_z
     scale_feedrate = (m_scale_f if args.machine else True) and not args.no_scale_feedrate
+    scale_extrusion = (m_scale_e if args.machine else True) and not args.no_scale_extrusion
     begin_marker = args.begin_marker if args.begin_marker is not None else m_begin
     end_marker = args.end_marker if args.end_marker is not None else m_end
 
@@ -513,6 +577,7 @@ def main(argv=None) -> int:
             begin_marker=begin_marker,
             end_marker=end_marker,
             scale_feedrate=scale_feedrate,
+            scale_extrusion=scale_extrusion,
             decimals=args.decimals,
             max_velocity=max_velocity,
         )
@@ -532,7 +597,7 @@ def main(argv=None) -> int:
         return 0
 
     out_path = args.output or args.input
-    payload = _header(transform, scale_feedrate) + "".join(result)
+    payload = _header(transform, scale_feedrate, scale_extrusion) + "".join(result)
     try:
         with open(out_path, "w", encoding="utf-8", errors="surrogateescape") as fh:
             fh.write(payload)
@@ -636,6 +701,10 @@ class Machine:
     @property
     def scale_feedrate(self) -> bool:
         return bool(self.postprocess.get("scale_feedrate", True))
+
+    @property
+    def scale_extrusion(self) -> bool:
+        return bool(self.postprocess.get("scale_extrusion", True))
 
     @property
     def begin_marker(self):
@@ -828,6 +897,7 @@ if __name__ == "__main__":
     "belt_axis": "z",
     "scale_z": true,
     "scale_feedrate": true,
+    "scale_extrusion": true,
     "begin_marker": "; nelox:begin",
     "end_marker": "; nelox:end",
     "comment": "Defaults for nelox_belt.py when run with --machine. belt_axis='z' because the IR3 V2 drives the conveyor as the (infinite) Z axis — see stepper_z position_max 99999 in the stock printer.cfg. scale_z=true because mainline Klipper has no belt kinematics; verify with a calibration cube before long prints."

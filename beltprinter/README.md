@@ -107,6 +107,7 @@ python3 nelox_belt.py --dry-run in.gcode
 | `-o, --output` | write here instead of editing in place |
 | `--no-scale-z` | skip rail (lift) scaling (only if firmware compensates the tilt — verify first) |
 | `--no-scale-feedrate` | leave F values untouched |
+| `--no-scale-extrusion` | leave E untouched on length-changing (vase-mode) moves |
 | `--max-velocity` | clamp belt/rail feedrate to this many mm/s (default: from `--machine`) |
 | `--begin-marker` / `--end-marker` | only transform between marker comments, so start/end G-code stays in machine coordinates |
 | `--decimals` | coordinate precision (default 4) |
@@ -123,9 +124,12 @@ can run through the script, and `examples/sample_belt.gcode` for the result.
   frame can't desync from the model frame (a silent belt-motion error otherwise).
 - Emits the dependent machine axes even on Z-only moves (both Y and Z can depend on
   model z).
-- Leaves extrusion `E` untouched (the deposited volume is unchanged) and handles the
-  **modal feedrate** correctly: F is re-emitted (and scaled) on F-less moves so the
-  rail/belt axis is never run at the wrong speed, clamped to `max_velocity`.
+- Handles the **modal feedrate** correctly: F is re-emitted (and scaled) on F-less
+  moves so the rail/belt axis is never run at the wrong speed, clamped to `max_velocity`.
+- **Extrusion compensation:** the shear is non-orthonormal, so on length-changing
+  extruding moves (continuous-Z / vase mode) `E` is scaled by the machine/model path
+  ratio to keep volume constant. It's a no-op for normal in-layer moves (ratio = 1).
+  Per-move scaling needs **relative E (M83)**; under absolute E (M82) it warns instead.
 - Passes start/end G-code through untransformed via begin/end markers.
 - Warns on **below-belt moves** (model z < 0) and on G2/G3 **arc moves** (a shear can't
   be re-expressed as an arc — disable arc fitting in the slicer).

@@ -92,6 +92,10 @@ class Machine:
         return bool(self.postprocess.get("scale_feedrate", True))
 
     @property
+    def scale_extrusion(self) -> bool:
+        return bool(self.postprocess.get("scale_extrusion", True))
+
+    @property
     def begin_marker(self):
         return self.postprocess.get("begin_marker")
 

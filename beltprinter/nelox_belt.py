@@ -44,7 +44,7 @@ import sys
 from dataclasses import dataclass, field
 
 BRAND = "Nelox Belt"
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 
 # Matches a G-code word like X12.34, Y-5, Z+0.2, E1.5e-3, F1800 — a letter followed
 # by a signed number with an optional exponent. The exponent is consumed as part of
@@ -115,6 +115,7 @@ class State:
     y: float = 0.0
     z: float = 0.0
     absolute_xyz: bool = True  # G90 (default) vs G91
+    absolute_e: bool = True     # M82 (default) vs M83 (relative extrusion)
     transforming: bool = False  # gated by the begin/end markers
     feed_real: float | None = None      # last modal feedrate the slicer intended (mm/min)
     feed_emitted: float | None = None   # feedrate the firmware currently holds (machine frame)
@@ -150,6 +151,7 @@ def transform_gcode(
     begin_marker: str | None = None,
     end_marker: str | None = None,
     scale_feedrate: bool = True,
+    scale_extrusion: bool = True,
     decimals: int = 4,
     max_velocity: float | None = None,
 ):
@@ -199,6 +201,14 @@ def transform_gcode(
             continue
         if cmd == "G91":
             state.absolute_xyz = False
+            yield raw
+            continue
+        if cmd == "M82":
+            state.absolute_e = True
+            yield raw
+            continue
+        if cmd == "M83":
+            state.absolute_e = False
             yield raw
             continue
 
@@ -320,9 +330,10 @@ def transform_gcode(
                 "below the belt surface; check model placement / start G-code"
             )
 
-        # Feedrate: scale by machine path length / real path length for this move.
+        # Machine/real path-length ratio for this move. Drives both feedrate scaling
+        # and extrusion compensation, so compute it whenever either is enabled.
         f_scale = 1.0
-        if scale_feedrate:
+        if scale_feedrate or scale_extrusion:
             real_d = math.dist(prev, new)
             if real_d > 1e-9:
                 f_scale = math.dist(transform.machine(*prev), transform.machine(*new)) / real_d
@@ -343,8 +354,27 @@ def transform_gcode(
             parts.append("Y" + _fmt(my, decimals))
         if emit_mz:
             parts.append("Z" + _fmt(mz, decimals))
+
+        # Extrusion compensation. The shear is non-orthonormal, so on moves whose
+        # machine path length differs from the model length (z changes while extruding
+        # — vase mode / continuous-Z) the deposited volume needs E * f_scale to stay
+        # constant. This is a no-op for normal in-layer moves (f_scale == 1). Absolute
+        # E (M82) can't be rescaled per-move without rewriting the whole accumulator,
+        # so we warn and recommend relative E there.
         if "E" in present:
-            parts.append("E" + present["E"])  # extrusion unchanged, original text kept
+            if scale_extrusion and abs(f_scale - 1.0) > 1e-9:
+                if state.absolute_e:
+                    parts.append("E" + present["E"])
+                    if "absolute-E extrusion" not in " ".join(stats.warnings):
+                        stats.warnings.append(
+                            "absolute-E extrusion not compensated on length-changing "
+                            "(vase-mode) moves — enable relative E (M83) for exact volume"
+                        )
+                else:  # relative E: scale the per-move extrusion delta
+                    parts.append("E" + _fmt(float(present["E"]) * f_scale, 5))
+            else:
+                parts.append("E" + present["E"])  # unchanged (normal layer-by-layer)
+
         for letter, value in words:  # passthrough for any non-geometry words (e.g. S)
             if letter.upper() not in ("X", "Y", "Z", "E", "F"):
                 parts.append(letter + value)
@@ -376,7 +406,7 @@ def transform_gcode(
     transform_gcode.last_stats = stats  # type: ignore[attr-defined]
 
 
-def _header(transform: Transform, scale_feedrate: bool) -> str:
+def _header(transform: Transform, scale_feedrate: bool, scale_extrusion: bool = True) -> str:
     shift, lift = "y+z*cot(a)", "z/sin(a)"
     if transform.belt_axis == "z":
         ymap, zmap = lift, shift
@@ -385,7 +415,8 @@ def _header(transform: Transform, scale_feedrate: bool) -> str:
     return (
         f"; Processed by {BRAND} v{VERSION}\n"
         f";   gantry angle = {transform.angle_deg} deg, belt_axis = {transform.belt_axis}, "
-        f"scale_z = {transform.scale_z}, scale_feedrate = {scale_feedrate}\n"
+        f"scale_z = {transform.scale_z}, scale_feedrate = {scale_feedrate}, "
+        f"scale_extrusion = {scale_extrusion}\n"
         f";   transform: X'=x  Y'={ymap}  Z'={zmap}\n"
     )
 
@@ -420,6 +451,11 @@ def main(argv=None) -> int:
         action="store_true",
         help="leave F (feedrate) values untouched",
     )
+    p.add_argument(
+        "--no-scale-extrusion",
+        action="store_true",
+        help="leave E (extrusion) untouched on length-changing (vase-mode) moves",
+    )
     p.add_argument("--begin-marker", help="only transform after a line containing this comment")
     p.add_argument("--end-marker", help="stop transforming at a line containing this comment")
     p.add_argument(
@@ -434,8 +470,8 @@ def main(argv=None) -> int:
     args = p.parse_args(argv)
 
     # Layer machine-config defaults under the explicit CLI flags.
-    m_angle, m_scale_z, m_scale_f, m_begin, m_end, m_belt, m_maxv = (
-        None, True, True, None, None, "z", None,
+    m_angle, m_scale_z, m_scale_f, m_begin, m_end, m_belt, m_maxv, m_scale_e = (
+        None, True, True, None, None, "z", None, True,
     )
     if args.machine:
         try:
@@ -451,7 +487,7 @@ def main(argv=None) -> int:
             return 2
         m_angle, m_scale_z, m_scale_f = mc.gantry_angle_deg, mc.scale_z, mc.scale_feedrate
         m_begin, m_end, m_belt = mc.begin_marker, mc.end_marker, mc.belt_axis
-        m_maxv = mc.motion.get("max_velocity")
+        m_maxv, m_scale_e = mc.motion.get("max_velocity"), mc.scale_extrusion
 
     angle = args.angle if args.angle is not None else (m_angle if m_angle is not None else 45.0)
     belt_axis = args.belt_axis if args.belt_axis is not None else m_belt
@@ -459,6 +495,7 @@ def main(argv=None) -> int:
     # store_true flags can only force OFF; the machine config sets the base value.
     scale_z = (m_scale_z if args.machine else True) and not args.no_scale_z
     scale_feedrate = (m_scale_f if args.machine else True) and not args.no_scale_feedrate
+    scale_extrusion = (m_scale_e if args.machine else True) and not args.no_scale_extrusion
     begin_marker = args.begin_marker if args.begin_marker is not None else m_begin
     end_marker = args.end_marker if args.end_marker is not None else m_end
 
@@ -482,6 +519,7 @@ def main(argv=None) -> int:
             begin_marker=begin_marker,
             end_marker=end_marker,
             scale_feedrate=scale_feedrate,
+            scale_extrusion=scale_extrusion,
             decimals=args.decimals,
             max_velocity=max_velocity,
         )
@@ -510,7 +548,7 @@ def main(argv=None) -> int:
         return 2
 
     out_path = args.output or args.input
-    payload = _header(transform, scale_feedrate) + "".join(result)
+    payload = _header(transform, scale_feedrate, scale_extrusion) + "".join(result)
     try:
         with open(out_path, "w", encoding="utf-8", errors="surrogateescape") as fh:
             fh.write(payload)

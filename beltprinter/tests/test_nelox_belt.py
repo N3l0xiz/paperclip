@@ -199,6 +199,39 @@ class TestModalFeedrate(unittest.TestCase):
         self.assertIn("F1800", out[0])
 
 
+class TestExtrusionCompensation(unittest.TestCase):
+    def test_in_layer_extrusion_unchanged(self):
+        # In-layer print move (constant model z): machine length == model length,
+        # so E must be left exactly as-is even with scaling on.
+        out = run(["M83\n", "G1 X10 Y5 E0.5\n"], transform=Transform(45.0))
+        self.assertIn("E0.5", out[1])
+
+    def test_relative_e_scaled_on_vase_move(self):
+        # Continuous-Z extruding move (vase mode) with relative E: E scales by f_scale.
+        lines = ["M83\n", "G1 Z1 E1.0\n"]
+        out = run(lines, transform=Transform(45.0), scale_extrusion=True)
+        # Pure model-z move: f_scale = sqrt(3); E should become 1.0 * sqrt(3).
+        e_val = float(out[1].split("E")[1].split()[0])
+        self.assertAlmostEqual(e_val, math.sqrt(3), places=3)
+
+    def test_absolute_e_warns_not_scaled(self):
+        # Default is absolute E (M82): can't rescale per-move; warn and leave E.
+        lines = ["M82\n", "G1 Z1 E1.0\n"]
+        out = run(lines, transform=Transform(45.0), scale_extrusion=True)
+        self.assertIn("E1.0", out[1])
+        self.assertTrue(any("absolute-E" in w for w in transform_gcode.last_stats.warnings))
+
+    def test_scale_extrusion_off_leaves_relative_e(self):
+        lines = ["M83\n", "G1 Z1 E1.0\n"]
+        out = run(lines, transform=Transform(45.0), scale_extrusion=False)
+        self.assertIn("E1.0", out[1])
+
+    def test_retraction_delta_not_scaled(self):
+        # Relative retraction is a pure-E move (no geometry) -> untouched.
+        out = run(["M83\n", "G1 E-2 F2400\n"], transform=Transform(45.0))
+        self.assertEqual(out[1], "G1 E-2 F2400\n")
+
+
 class TestMarkersAndModes(unittest.TestCase):
     def test_arc_passthrough_and_warning(self):
         lines = ["G2 X5 Y5 I1 J1\n"]
