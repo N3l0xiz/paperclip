@@ -202,6 +202,7 @@ class Stats:
     moves_transformed: int = 0
     arc_moves: int = 0
     lines: int = 0
+    fatal_arcs: bool = False
     warnings: list[str] = field(default_factory=list)
 
 
@@ -332,13 +333,30 @@ def transform_gcode(
 
         if is_arc and state.transforming:
             # A shear turns a circle into an ellipse — it can't be re-expressed as
-            # G2/G3. Pass it through and warn so the user disables arc fitting.
+            # G2/G3. This is a hard error: emitting wrong-geometry arcs to a real
+            # belt printer risks a toolhead crash. Flag it fatal so main() refuses
+            # to write output. We still advance state to the arc endpoint (parsing
+            # X/Y/Z like a linear move) so downstream coordinates never desync.
             stats.arc_moves += 1
+            stats.fatal_arcs = True
             if "arc-fitting" not in " ".join(stats.warnings):
                 stats.warnings.append(
                     "arc-fitting move (G2/G3) found and left untransformed — "
                     "disable 'Arc fitting' in the slicer for correct belt geometry"
                 )
+            arc_words = _WORD.findall(rest)
+            arc_present = {letter.upper(): value for letter, value in arc_words}
+            if state.absolute_xyz:
+                if "X" in arc_present:
+                    state.x = float(arc_present["X"])
+                if "Y" in arc_present:
+                    state.y = float(arc_present["Y"])
+                if "Z" in arc_present:
+                    state.z = float(arc_present["Z"])
+            else:  # relative — deltas
+                state.x += float(arc_present.get("X", 0.0))
+                state.y += float(arc_present.get("Y", 0.0))
+                state.z += float(arc_present.get("Z", 0.0))
             yield raw
             continue
 
@@ -596,6 +614,15 @@ def main(argv=None) -> int:
     if args.dry_run:
         return 0
 
+    if stats.fatal_arcs:
+        print(
+            f"{BRAND}: error: arc moves (G2/G3) found in the transformed region — "
+            "disable 'Arc fitting' in the slicer; refusing to write belt G-code that "
+            "could crash the toolhead",
+            file=sys.stderr,
+        )
+        return 2
+
     out_path = args.output or args.input
     payload = _header(transform, scale_feedrate, scale_extrusion) + "".join(result)
     try:
@@ -658,6 +685,12 @@ class Axis:
             raise ValueError(f"axis '{self.name}': gear_ratio parts must be > 0, got {self.gear_ratio}")
         if self.rotation_distance <= 0:
             raise ValueError(f"axis '{self.name}': rotation_distance must be > 0")
+        if self.microsteps <= 0:
+            raise ValueError(f"axis '{self.name}': microsteps must be > 0, got {self.microsteps}")
+        if self.full_steps_per_rotation <= 0:
+            raise ValueError(
+                f"axis '{self.name}': full_steps_per_rotation must be > 0, got {self.full_steps_per_rotation}"
+            )
 
     @property
     def ratio(self) -> float:
@@ -828,7 +861,7 @@ if __name__ == "__main__":
   "name": "IdeaFormer IR3 V2",
   "firmware": "klipper",
   "kinematics": "corexy",
-  "comment": "Belt/conveyor printer, 45-degree tilted gantry. Values verified against a working community printer.cfg (github.com/dborio/Ideaformer-IR3v2). Everything here is adjustable; gear_ratio is expressed as [numerator, denominator] like Klipper's gear_ratio (e.g. [50, 17]). The effective distance moved per MOTOR revolution is rotation_distance / (numerator/denominator).",
+  "comment": "Belt/conveyor printer, 45-degree tilted gantry. Values verified against a working community printer.cfg (github.com/dborio/Ideaformer-IR3v2). Everything here is adjustable; gear_ratio is expressed as [numerator, denominator] like Klipper's gear_ratio (e.g. [50, 17]). The effective distance moved per MOTOR revolution is rotation_distance / (numerator/denominator). Caveat: confirm the y<->z motor assignment (machine Y = 45-degree gantry rail/lift, machine Z = conveyor belt feed) against your actual printer.cfg before long prints.",
 
   "gantry_angle_deg": 45.0,
 
@@ -836,8 +869,8 @@ if __name__ == "__main__":
     "x": 250,
     "y": 354,
     "z": null,
-    "infinite_axis": "y",
-    "comment": "y is the belt-feed direction and is effectively infinite; 354 is the stock soft limit. z is null = unbounded (we slice upright; height becomes belt length)."
+    "infinite_axis": "z",
+    "comment": "z is the belt-feed direction and is effectively infinite (we slice upright; height becomes belt length). y is the 45-degree gantry rail (lift); its 354 mm is the finite rail travel (~build height x sqrt(2)) and the stock soft limit. z is null = unbounded."
   },
 
   "nozzle_diameter": 0.4,
@@ -867,10 +900,10 @@ if __name__ == "__main__":
       "pulley_teeth": 20,
       "belt_pitch": 2.0,
       "geared": false,
-      "is_belt_feed": true,
+      "is_belt_feed": false,
       "position_min": -5,
       "position_max": 354,
-      "note": "Conveyor-belt feed axis. Ungeared 20T GT2."
+      "note": "45-degree gantry rail (lift) axis, CoreXY-driven. Ungeared 20T GT2. Finite travel ~354 mm = build height x sqrt(2). NOT the conveyor."
     },
     "z": {
       "rotation_distance": 3.7,
@@ -880,7 +913,7 @@ if __name__ == "__main__":
       "geared": true,
       "position_min": -5,
       "position_max": 99999,
-      "note": "45-degree gantry rail, gearbox-driven. The stock config folds the gearbox reduction into the effective rotation_distance of 3.7, so gear_ratio is left at 1:1. To model the gearbox explicitly, set gear_ratio to the box's reduction and set rotation_distance to the ungeared value (effective = rotation_distance / ratio must stay 3.7)."
+      "note": "Conveyor / belt-feed axis (infinite, position_max 99999), gearbox-driven. This is the belt progression direction. The stock config folds the gearbox reduction into the effective rotation_distance of 3.7, so gear_ratio is left at 1:1. To model the gearbox explicitly, set gear_ratio to the box's reduction and set rotation_distance to the ungeared value (effective = rotation_distance / ratio must stay 3.7)."
     },
     "extruder": {
       "rotation_distance": 4.4,
