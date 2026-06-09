@@ -33,6 +33,10 @@ class TestAxis(unittest.TestCase):
         with self.assertRaises(ValueError):
             Axis("x", rotation_distance=0)
 
+    def test_invalid_microsteps(self):
+        with self.assertRaises(ValueError):
+            Axis("x", rotation_distance=40, microsteps=0)
+
 
 class TestIR3V2Config(unittest.TestCase):
     def setUp(self):
@@ -62,8 +66,11 @@ class TestIR3V2Config(unittest.TestCase):
         self.assertAlmostEqual(self.m.axes["x"].steps_per_mm, 160.0)
 
     def test_extra_keys_preserved(self):
-        self.assertTrue(self.m.axes["y"].extra.get("is_belt_feed"))
+        # Extra (non-Axis) keys round-trip through loading. y is the gantry rail
+        # (lift), so is_belt_feed is False; the belt is z (position_max 99999).
+        self.assertIs(self.m.axes["y"].extra.get("is_belt_feed"), False)
         self.assertEqual(self.m.axes["y"].extra.get("position_max"), 354)
+        self.assertEqual(self.m.axes["z"].extra.get("position_max"), 99999)
 
     def test_klipper_cfg_snippet(self):
         cfg = to_klipper_cfg(self.m)

@@ -125,6 +125,7 @@ class Stats:
     moves_transformed: int = 0
     arc_moves: int = 0
     lines: int = 0
+    fatal_arcs: bool = False
     warnings: list[str] = field(default_factory=list)
 
 
@@ -246,13 +247,30 @@ def transform_gcode(
 
         if is_arc and state.transforming:
             # A shear turns a circle into an ellipse — it can't be re-expressed as
-            # G2/G3. Pass it through and warn so the user disables arc fitting.
+            # G2/G3. This is a hard error: emitting wrong-geometry arcs to a real
+            # belt printer risks a toolhead crash. Flag it fatal so main() refuses
+            # to write output. We still advance state to the arc endpoint (parsing
+            # X/Y/Z like a linear move) so downstream coordinates never desync.
             stats.arc_moves += 1
+            stats.fatal_arcs = True
             if "arc-fitting" not in " ".join(stats.warnings):
                 stats.warnings.append(
                     "arc-fitting move (G2/G3) found and left untransformed — "
                     "disable 'Arc fitting' in the slicer for correct belt geometry"
                 )
+            arc_words = _WORD.findall(rest)
+            arc_present = {letter.upper(): value for letter, value in arc_words}
+            if state.absolute_xyz:
+                if "X" in arc_present:
+                    state.x = float(arc_present["X"])
+                if "Y" in arc_present:
+                    state.y = float(arc_present["Y"])
+                if "Z" in arc_present:
+                    state.z = float(arc_present["Z"])
+            else:  # relative — deltas
+                state.x += float(arc_present.get("X", 0.0))
+                state.y += float(arc_present.get("Y", 0.0))
+                state.z += float(arc_present.get("Z", 0.0))
             yield raw
             continue
 
@@ -481,6 +499,15 @@ def main(argv=None) -> int:
 
     if args.dry_run:
         return 0
+
+    if stats.fatal_arcs:
+        print(
+            f"{BRAND}: error: arc moves (G2/G3) found in the transformed region — "
+            "disable 'Arc fitting' in the slicer; refusing to write belt G-code that "
+            "could crash the toolhead",
+            file=sys.stderr,
+        )
+        return 2
 
     out_path = args.output or args.input
     payload = _header(transform, scale_feedrate) + "".join(result)

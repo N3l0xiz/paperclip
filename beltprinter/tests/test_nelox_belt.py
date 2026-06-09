@@ -6,11 +6,12 @@ or simply: python3 beltprinter/tests/test_nelox_belt.py
 import math
 import os
 import sys
+import tempfile
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from nelox_belt import Transform, transform_gcode  # noqa: E402
+from nelox_belt import Transform, main, transform_gcode  # noqa: E402
 
 SQRT2 = math.sqrt(2)
 
@@ -206,6 +207,24 @@ class TestMarkersAndModes(unittest.TestCase):
         stats = transform_gcode.last_stats
         self.assertEqual(stats.arc_moves, 1)
         self.assertTrue(any("arc" in w for w in stats.warnings))
+        self.assertIs(stats.fatal_arcs, True)
+
+    def test_arc_in_transformed_region_main_returns_2_and_writes_nothing(self):
+        src = tempfile.NamedTemporaryFile(
+            mode="w", suffix=".gcode", delete=False, encoding="utf-8"
+        )
+        out_path = src.name + ".out"
+        try:
+            src.write("G1 X0 Y0 Z0\nG2 X10 Y0 I5 J0\n")
+            src.close()
+            rc = main(["--angle", "45", "-o", out_path, src.name])
+            self.assertEqual(rc, 2)
+            self.assertFalse(os.path.exists(out_path))
+            self.assertIs(transform_gcode.last_stats.fatal_arcs, True)
+        finally:
+            os.unlink(src.name)
+            if os.path.exists(out_path):
+                os.unlink(out_path)
 
     def test_begin_marker_gates_transform(self):
         lines = ["G1 X1 Y1 Z1\n", "; nelox:begin\n", "G1 X1 Y1 Z1\n"]

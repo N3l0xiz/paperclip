@@ -69,8 +69,8 @@ gear ratios are first-class:
 | Axis | rotation_distance | gear_ratio | notes |
 |---|---|---|---|
 | X / Y (CoreXY) | 40 | 1:1 | 20T GT2, ungeared |
-| Y belt feed | 40 | 1:1 | conveyor, soft max 354 mm |
-| Z (45° gantry) | 3.7 | 1:1* | gearbox-driven (reduction baked into rotation_distance) |
+| Y (45° gantry rail) | 40 | 1:1 | rail/lift, finite travel ~354 mm = build height × √2 |
+| Z belt feed | 3.7 | 1:1* | conveyor (infinite), gearbox-driven (reduction baked into rotation_distance) |
 | Extruder | 4.4 | 1:1* | dual-gear direct drive (~3:1 baked in) |
 
 \* The stock firmware folds the gearbox/dual-gear reduction into the effective

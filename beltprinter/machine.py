@@ -41,6 +41,12 @@ class Axis:
             raise ValueError(f"axis '{self.name}': gear_ratio parts must be > 0, got {self.gear_ratio}")
         if self.rotation_distance <= 0:
             raise ValueError(f"axis '{self.name}': rotation_distance must be > 0")
+        if self.microsteps <= 0:
+            raise ValueError(f"axis '{self.name}': microsteps must be > 0, got {self.microsteps}")
+        if self.full_steps_per_rotation <= 0:
+            raise ValueError(
+                f"axis '{self.name}': full_steps_per_rotation must be > 0, got {self.full_steps_per_rotation}"
+            )
 
     @property
     def ratio(self) -> float:
