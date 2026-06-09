@@ -68,10 +68,11 @@
   },
 
   "postprocess": {
+    "belt_axis": "z",
     "scale_z": true,
     "scale_feedrate": true,
     "begin_marker": "; nelox:begin",
     "end_marker": "; nelox:end",
-    "comment": "Defaults for nelox_belt.py when run with --machine. scale_z=true because mainline Klipper has no belt kinematics; verify with a calibration cube before long prints."
+    "comment": "Defaults for nelox_belt.py when run with --machine. belt_axis='z' because the IR3 V2 drives the conveyor as the (infinite) Z axis — see stepper_z position_max 99999 in the stock printer.cfg. scale_z=true because mainline Klipper has no belt kinematics; verify with a calibration cube before long prints."
   }
 }

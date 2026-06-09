@@ -55,6 +55,7 @@ class TestIR3V2Config(unittest.TestCase):
         self.assertTrue(self.m.scale_feedrate)
         self.assertEqual(self.m.begin_marker, "; nelox:begin")
         self.assertEqual(self.m.end_marker, "; nelox:end")
+        self.assertEqual(self.m.belt_axis, "z")  # IR3 V2 drives the belt as Z
 
     def test_x_steps_per_mm(self):
         # 200 full steps * 32 microsteps / 40 mm = 160 steps/mm

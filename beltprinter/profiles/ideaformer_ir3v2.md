@@ -87,17 +87,33 @@ M84
 
 Then run the post-processor with `--begin-marker "; nelox:begin" --end-marker "; nelox:end"`.
 
-## 5. Verify before a long print (important)
+## 5. Belt axis & the transform (IR3 V2 = Z)
 
-The one firmware-dependent unknown is the **Z-scaling convention**. Confirm it
-cheaply before committing to a long print:
+The IR3 V2 drives the **conveyor as the Z axis** ("Infinite Z-axis"; its stock
+`stepper_z` has `position_max: 99999`). Nelox Belt therefore defaults to
+`belt_axis = "z"`, mapping an upright model point `(x, y, z)` to:
+
+```
+X' = x                    Y' = z / sin(45°)        Z' = y + z·cot(45°)
+                          (gantry-rail "lift")     (belt progression)
+```
+
+So a flat first layer (height z = 0.2 mm) ends up with a small **Y** value (the
+rail position) and the model's footprint laid out along **Z** (the belt).
+CR-30-family machines use the opposite mapping — set `belt_axis: "y"` for those.
+
+## 6. Verify before a long print (important)
+
+Two firmware-dependent unknowns to confirm cheaply first:
 
 1. Slice a small calibration cube (e.g. 20 mm) upright and export through Nelox Belt.
-2. Open the output and check the **first-layer** move: at real z = 0.2 mm with a 45°
-   gantry you should see `Z0.2828` (= 0.2 × √2) and the layer shifted by `Y+0.2`.
+2. Open the output and check the **first-layer** move: at real z = 0.2 mm you should
+   see `Y0.2828` (= 0.2 × √2, the rail lift) and the footprint on `X`/`Z`.
+   - If Y/Z look swapped (footprint on X/Y, lift on Z), your machine uses the CR-30
+     convention — set `belt_axis: "y"`.
 3. Print it. If the cube's height is off by a factor of √2 (≈1.41), your firmware is
-   already compensating the tilt — re-run with `--no-scale-z`.
-4. If the 45° lean angle looks wrong, double-check the model orientation (length
+   already compensating the tilt — set `scale_z: false` (or `--no-scale-z`).
+4. If the 45° lean angle looks wrong, double-check the model orientation (belt-length
    along +Y) and that arc fitting is disabled.
 
 If your IR3 V2 was supplied with a known-good belt G-code from the stock slicer,

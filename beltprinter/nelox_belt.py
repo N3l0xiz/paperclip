@@ -44,7 +44,7 @@ import sys
 from dataclasses import dataclass, field
 
 BRAND = "Nelox Belt"
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 
 # Matches a G-code word like X12.34, Y-5, Z0.2, E1.5, F1800 (letter + signed number).
 _WORD = re.compile(r"([A-Za-z])\s*(-?\d*\.?\d+)")
@@ -52,26 +52,52 @@ _WORD = re.compile(r"([A-Za-z])\s*(-?\d*\.?\d+)")
 
 @dataclass
 class Transform:
-    """Geometric belt transform for a tilted-gantry printer."""
+    """Geometric belt transform for a tilted-gantry printer.
+
+    The transform produces two derived coordinates from an upright model point:
+
+      shift = y + z * cot(theta)   # belt-progression: how far along the belt
+      lift  = z / sin(theta)       # gantry-rail travel for the model height
+
+    Which physical machine axis carries each depends on the printer's convention,
+    selected by `belt_axis`:
+
+      belt_axis="z"  (IdeaFormer IR3 V2 "infinite Z", the default):
+          X_machine = x,  Y_machine = lift,  Z_machine = shift
+      belt_axis="y"  (CR-30 style "infinite Y"):
+          X_machine = x,  Y_machine = shift, Z_machine = lift
+
+    This was confirmed against hardware-validated belt slicers and the IR3 V2's
+    own Klipper config (its belt is the Z axis, position_max ~infinite).
+    """
 
     angle_deg: float = 45.0
-    scale_z: bool = True  # set False if the firmware compensates the gantry tilt itself
+    scale_z: bool = True  # scale the lift (rail) axis by 1/sin; off if firmware compensates
+    belt_axis: str = "z"  # "z" = IR3 V2 (default), "y" = CR-30
 
     def __post_init__(self) -> None:
         if not 0 < self.angle_deg < 90:
             raise ValueError(f"gantry angle must be between 0 and 90 degrees, got {self.angle_deg}")
+        if self.belt_axis not in ("y", "z"):
+            raise ValueError(f"belt_axis must be 'y' or 'z', got {self.belt_axis!r}")
         theta = math.radians(self.angle_deg)
-        self._cot = 1.0 / math.tan(theta)          # y-shift per unit height
-        self._inv_sin = 1.0 / math.sin(theta)      # z-scaling along the rail
+        self._cot = 1.0 / math.tan(theta)          # belt progression per unit height
+        self._inv_sin = 1.0 / math.sin(theta)      # rail scaling for height
 
-    def y(self, y: float, z: float) -> float:
+    def shift(self, y: float, z: float) -> float:
+        """Belt-progression coordinate (depends on model y and z)."""
         return y + z * self._cot
 
-    def z(self, z: float) -> float:
+    def lift(self, z: float) -> float:
+        """Gantry-rail coordinate (depends on model z)."""
         return z * self._inv_sin if self.scale_z else z
 
-    def point(self, x: float, y: float, z: float) -> tuple[float, float, float]:
-        return x, self.y(y, z), self.z(z)
+    def machine(self, x: float, y: float, z: float) -> tuple[float, float, float]:
+        """Map an upright model point (or delta) to machine X/Y/Z."""
+        s, l = self.shift(y, z), self.lift(z)
+        if self.belt_axis == "z":
+            return x, l, s
+        return x, s, l
 
 
 @dataclass
@@ -224,29 +250,35 @@ def transform_gcode(
         if scale_feedrate and "F" in present:
             real_d = math.dist(prev, new)
             if real_d > 1e-9:
-                mp = transform.point(*prev)
-                mn = transform.point(*new)
+                mp = transform.machine(*prev)
+                mn = transform.machine(*new)
                 f_scale = math.dist(mp, mn) / real_d
 
-        # Rebuild in canonical order: command, X, Y, Z, E, extras, F.
-        # Y must be emitted whenever Z is present (its value depends on z), even if
-        # the original line had no Y word.
-        parts = [gword]
-        emit_y = ("Y" in present) or ("Z" in present)
-        if state.absolute_xyz:
-            if "X" in present:
-                parts.append("X" + _fmt(state.x, decimals))
-            if emit_y:
-                parts.append("Y" + _fmt(transform.y(state.y, state.z), decimals))
-            if "Z" in present:
-                parts.append("Z" + _fmt(transform.z(state.z), decimals))
+        # Work out which MACHINE axes must be re-emitted from which MODEL words.
+        # The shift coordinate depends on model y and z; the lift coordinate on z.
+        # With belt_axis="z": Y=lift(z), Z=shift(y,z); with "y": Y=shift(y,z), Z=lift(z).
+        has_y, has_z = "Y" in present, "Z" in present
+        shift_changed = has_y or has_z
+        lift_changed = has_z
+        if transform.belt_axis == "z":
+            emit_my, emit_mz = lift_changed, shift_changed
         else:
-            if "X" in present:
-                parts.append("X" + _fmt(dx, decimals))
-            if emit_y:
-                parts.append("Y" + _fmt(transform.y(dy, dz), decimals))  # delta transform
-            if "Z" in present:
-                parts.append("Z" + _fmt(transform.z(dz), decimals))
+            emit_my, emit_mz = shift_changed, lift_changed
+
+        # Compute machine coordinates (absolute) or deltas (relative) in one call.
+        if state.absolute_xyz:
+            mx, my, mz = transform.machine(state.x, state.y, state.z)
+        else:
+            mx, my, mz = transform.machine(dx, dy, dz)
+
+        # Rebuild in canonical order: command, X, Y, Z, E, extras, F.
+        parts = [gword]
+        if "X" in present:
+            parts.append("X" + _fmt(mx, decimals))
+        if emit_my:
+            parts.append("Y" + _fmt(my, decimals))
+        if emit_mz:
+            parts.append("Z" + _fmt(mz, decimals))
 
         if "E" in present:
             parts.append("E" + present["E"])  # extrusion unchanged, original text kept
@@ -267,11 +299,16 @@ def transform_gcode(
 
 
 def _header(transform: Transform, scale_feedrate: bool) -> str:
+    shift, lift = "y+z*cot(a)", "z/sin(a)"
+    if transform.belt_axis == "z":
+        ymap, zmap = lift, shift
+    else:
+        ymap, zmap = shift, lift
     return (
         f"; Processed by {BRAND} v{VERSION}\n"
-        f";   gantry angle = {transform.angle_deg} deg, "
+        f";   gantry angle = {transform.angle_deg} deg, belt_axis = {transform.belt_axis}, "
         f"scale_z = {transform.scale_z}, scale_feedrate = {scale_feedrate}\n"
-        f";   transform: X'=x  Y'=y+z*cot(a)  Z'=z/sin(a)\n"
+        f";   transform: X'=x  Y'={ymap}  Z'={zmap}\n"
     )
 
 
@@ -290,9 +327,15 @@ def main(argv=None) -> int:
     )
     p.add_argument("-a", "--angle", type=float, default=None, help="gantry angle in degrees (default: 45)")
     p.add_argument(
+        "--belt-axis",
+        choices=("y", "z"),
+        default=None,
+        help="which machine axis is the belt: 'z' = IdeaFormer IR3 V2 (default), 'y' = CR-30",
+    )
+    p.add_argument(
         "--no-scale-z",
         action="store_true",
-        help="do not scale Z by 1/sin(angle) — use only if firmware compensates the tilt",
+        help="do not scale the gantry-rail axis by 1/sin(angle) — use only if firmware compensates the tilt",
     )
     p.add_argument(
         "--no-scale-feedrate",
@@ -307,7 +350,7 @@ def main(argv=None) -> int:
     args = p.parse_args(argv)
 
     # Layer machine-config defaults under the explicit CLI flags.
-    m_angle, m_scale_z, m_scale_f, m_begin, m_end = None, True, True, None, None
+    m_angle, m_scale_z, m_scale_f, m_begin, m_end, m_belt = None, True, True, None, None, "z"
     if args.machine:
         try:
             from machine import load_machine  # local module, no third-party deps
@@ -321,9 +364,10 @@ def main(argv=None) -> int:
             print(f"{BRAND}: cannot load machine {args.machine}: {exc}", file=sys.stderr)
             return 2
         m_angle, m_scale_z, m_scale_f = mc.gantry_angle_deg, mc.scale_z, mc.scale_feedrate
-        m_begin, m_end = mc.begin_marker, mc.end_marker
+        m_begin, m_end, m_belt = mc.begin_marker, mc.end_marker, mc.belt_axis
 
     angle = args.angle if args.angle is not None else (m_angle if m_angle is not None else 45.0)
+    belt_axis = args.belt_axis if args.belt_axis is not None else m_belt
     # store_true flags can only force OFF; the machine config sets the base value.
     scale_z = (m_scale_z if args.machine else True) and not args.no_scale_z
     scale_feedrate = (m_scale_f if args.machine else True) and not args.no_scale_feedrate
@@ -331,7 +375,7 @@ def main(argv=None) -> int:
     end_marker = args.end_marker if args.end_marker is not None else m_end
 
     try:
-        transform = Transform(angle_deg=angle, scale_z=scale_z)
+        transform = Transform(angle_deg=angle, scale_z=scale_z, belt_axis=belt_axis)
     except ValueError as exc:
         print(f"{BRAND}: {exc}", file=sys.stderr)
         return 2

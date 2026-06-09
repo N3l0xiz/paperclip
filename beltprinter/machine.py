@@ -93,6 +93,10 @@ class Machine:
     def end_marker(self):
         return self.postprocess.get("end_marker")
 
+    @property
+    def belt_axis(self) -> str:
+        return self.postprocess.get("belt_axis", "z")
+
 
 _RESERVED_AXIS_KEYS = {
     "rotation_distance",

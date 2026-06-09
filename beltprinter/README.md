@@ -16,22 +16,33 @@ post-processing hook — no fork, no rebuild.
 A belt printer's gantry is tilted by the **gantry angle** θ (45° on the IR3 V2). On
 mainline Klipper there is no belt kinematics, so the firmware expects G-code already
 expressed in the *sheared* machine frame. We slice the model **upright** in Orca
-(normal horizontal layers) and then apply the transform that maps a real-world point
-`(x, y, z)` — `z` = true height, `y` = along the belt — into machine coordinates:
+(normal horizontal layers) and derive two coordinates from each point `(x, y, z)`
+(`z` = true height, `y` = along the belt):
 
 ```
-X' = x
-Y' = y + z / tan(θ)      # higher layers are pushed forward along the belt
-Z' = z / sin(θ)          # the tilted rail travels farther than the height
+shift = y + z / tan(θ)    # belt progression: higher layers move further along the belt
+lift  = z / sin(θ)        # gantry-rail travel for the model height
 ```
 
-For **θ = 45°**: `Y' = y + z`, `Z' = z·√2`.
+Which **machine axis** carries each depends on the printer's convention, set by
+`belt_axis`:
+
+```
+belt_axis = "z"  (IdeaFormer IR3 V2 "infinite Z", the default)
+    X' = x      Y' = lift      Z' = shift
+belt_axis = "y"  (CR-30 style)
+    X' = x      Y' = shift     Z' = lift
+```
+
+The IR3 V2 drives the **conveyor as the Z axis** — confirmed by its marketing
+("Infinite Z-axis"), by its stock Klipper config (`stepper_z` `position_max: 99999`),
+and by hardware-validated belt slicers. So Nelox Belt defaults to `belt_axis="z"`;
+flip to `"y"` for CR-30-family machines.
 
 The transform is linear in `(y, z)` with no constant term, so it applies identically
 to absolute coordinates (G90) and relative deltas (G91). Each horizontal layer ends
-up sheared forward along the belt proportional to its height — producing the 45°
-belt geometry, with lower (earlier) layers leading and higher layers trailing, which
-matches how the belt feeds finished work away.
+up sheared along the belt proportional to its height, with lower (earlier) layers
+leading — which matches how the belt feeds finished work away.
 
 ## Quick start
 
@@ -82,7 +93,7 @@ sections — no drift between the slicer config and the firmware.
 python3 nelox_belt.py --machine machines/ideaformer_ir3v2.json path/to/sliced.gcode
 
 # Or specify everything by hand:
-python3 nelox_belt.py --angle 45 -o out.gcode in.gcode
+python3 nelox_belt.py --angle 45 --belt-axis z -o out.gcode in.gcode
 
 # Analyze only, write nothing:
 python3 nelox_belt.py --dry-run in.gcode
@@ -92,8 +103,9 @@ python3 nelox_belt.py --dry-run in.gcode
 |---|---|
 | `-m, --machine` | load a machine JSON for angle + post-process defaults (CLI flags override) |
 | `-a, --angle` | gantry angle in degrees (default 45) |
+| `--belt-axis` | which machine axis is the belt: `z` (IR3 V2, default) or `y` (CR-30) |
 | `-o, --output` | write here instead of editing in place |
-| `--no-scale-z` | skip Z scaling (only if firmware compensates the tilt — verify first) |
+| `--no-scale-z` | skip rail (lift) scaling (only if firmware compensates the tilt — verify first) |
 | `--no-scale-feedrate` | leave F values untouched |
 | `--begin-marker` / `--end-marker` | only transform between marker comments, so start/end G-code stays in machine coordinates |
 | `--decimals` | coordinate precision (default 4) |
